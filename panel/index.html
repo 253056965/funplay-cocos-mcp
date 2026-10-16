@@ -1,0 +1,61 @@
+<div class="fp-panel">
+  <header class="fp-header">
+    <div class="fp-title">
+      <span class="fp-logo">MCP</span>
+      <div class="fp-title-text">
+        <h1>Funplay Cocos MCP</h1>
+        <p class="fp-subtitle">{{ status.projectName || 'No project' }} · Cocos {{ status.cocosVersion || '?' }}</p>
+      </div>
+    </div>
+    <span class="fp-badge" :class="status.running ? 'is-on' : 'is-off'">
+      <i class="fp-dot"></i>{{ status.running ? 'Running' : 'Stopped' }}
+    </span>
+  </header>
+
+  <section class="fp-endpoint">
+    <div class="fp-endpoint-row">
+      <span class="fp-label">Endpoint</span>
+      <code class="fp-url">{{ status.url || '—' }}</code>
+      <button class="fp-btn fp-btn-ghost" @click="copyUrl" :disabled="!status.running">Copy</button>
+    </div>
+    <div class="fp-meta">
+      <span>Profile: <b>{{ status.toolProfile || 'core' }}</b></span>
+      <span>Version: <b>{{ status.version || '—' }}</b></span>
+      <span>Port: <b>{{ status.port || '—' }}</b><em v-if="status.portFallbackActive"> (fallback)</em></span>
+    </div>
+  </section>
+
+  <section class="fp-actions">
+    <button class="fp-btn fp-btn-primary" @click="start" :disabled="busy || status.running">Start</button>
+    <button class="fp-btn" @click="stop" :disabled="busy || !status.running">Stop</button>
+    <button class="fp-btn" @click="restart" :disabled="busy">Restart</button>
+    <button class="fp-btn fp-btn-ghost" @click="refresh" :disabled="busy">Refresh</button>
+    <span class="fp-status-text" v-if="message">{{ message }}</span>
+  </section>
+
+  <section class="fp-grid">
+    <div class="fp-card">
+      <h2>Tools <span class="fp-count">{{ tools.length }}</span></h2>
+      <ul class="fp-tool-list">
+        <li v-for="tool in tools">
+          <span class="fp-tool-name">{{ tool.name }}</span>
+          <span class="fp-tool-desc">{{ tool.description }}</span>
+        </li>
+        <li v-if="!tools.length" class="fp-empty">No tools exposed by the current profile.</li>
+      </ul>
+    </div>
+
+    <div class="fp-card">
+      <h2>Recent activity</h2>
+      <ul class="fp-activity">
+        <li v-for="item in recentInteractions" :class="'is-' + item.status">
+          <span class="fp-activity-tool">{{ item.toolName }}</span>
+          <span class="fp-activity-status">{{ item.status }}</span>
+          <span class="fp-activity-summary">{{ item.summary }}</span>
+          <span class="fp-activity-time">{{ item.timestamp }}</span>
+        </li>
+        <li v-if="!recentInteractions.length" class="fp-empty">No MCP calls recorded yet.</li>
+      </ul>
+    </div>
+  </section>
+</div>

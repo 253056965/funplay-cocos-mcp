@@ -1,73 +1,138 @@
 'use strict';
 
-module.paths.push(Editor.App.path + '/node_modules');
+// Cocos Creator 2.4 scene script for the Funplay MCP extension.
+//
+// This file is loaded by Cocos Creator as the package scene script declared in
+// package.json ("scene-script": "scene.js"). It runs inside the scene process,
+// where the engine is exposed as the global `cc` namespace.
+//
+// Every exported function is invoked from the extension main process through
+// Editor.Scene.callSceneScript(packageName, method, payload, callback). The
+// dispatcher below tolerates either (event, ...args) or (...args, event)
+// argument ordering by locating the object that carries a `reply` function.
 
-const cc = require('cc');
-const { attachPrefabMetadata, normalizePrefabNodeLayers } = require('./lib/prefab-metadata');
-const { captureScriptExecution } = require('./lib/script-execution');
+/* global cc, Editor */
 
-const {
-  Node,
-  director,
-  Vec3,
-  Quat,
-  Color,
-  assetManager,
-  instantiate,
-  Prefab,
-  Scene,
-  SceneAsset,
-  js,
-  Component,
-  EventHandler,
-  Canvas,
-  UITransform,
-  Label,
-  Sprite,
-  Button,
-  Widget,
-  Camera,
-  Animation,
-  AnimationClip,
-} = cc;
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-
-async function callPreviewRuntimeTool(name) {
-  // Keep legacy scene-script entrypoints, but route them back to the editor's
-  // Game View controller rather than pausing this edit-scene director.
-  const output = await Editor.Message.request('funplay-cocos-mcp', 'call-tool', name, {});
-  const result = typeof output === 'string' ? JSON.parse(output) : output;
-  if (!result || result.ok !== true) {
-    throw new Error((result && result.summary) || `Preview tool '${name}' failed.`);
+var ccNamespace = null;
+if (typeof cc !== 'undefined' && cc) {
+  ccNamespace = cc;
+} else if (typeof global !== 'undefined' && global.cc) {
+  ccNamespace = global.cc;
+} else if (typeof window !== 'undefined' && window.cc) {
+  ccNamespace = window.cc;
+} else {
+  try {
+    ccNamespace = require('cc');
+  } catch (error) {
+    ccNamespace = null;
   }
-  return result.data;
+}
+
+var { captureScriptExecution } = require('./lib/script-execution');
+
+var AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+
+function getCC() {
+  if (!ccNamespace) {
+    throw new Error('The Cocos engine namespace (cc) is unavailable in the scene process.');
+  }
+  return ccNamespace;
 }
 
 function getScene() {
-  const scene = director.getScene();
+  var engine = getCC();
+  var director = engine.director;
+  var scene = director && director.getScene();
   if (!scene) {
     throw new Error('No active scene is loaded.');
   }
   return scene;
 }
 
+// Cocos Creator 2.4 stores components on the private `_components` array (the
+// public `components` accessor does not exist on 2.4 nodes), and both
+// `node.scale` and `node.rotation` are deprecated numeric 2D shims that spam
+// "is deprecated since v2.1.0" warnings and return a Number instead of a Vec3.
+// These helpers read the real 2.4 storage so no deprecation warnings fire.
+function getNodeComponents(node) {
+  if (!node) {
+    return [];
+  }
+  if (Array.isArray(node._components)) {
+    return node._components;
+  }
+  if (Array.isArray(node.components)) {
+    return node.components;
+  }
+  return [];
+}
+
+function getNodeScale(node) {
+  if (!node) {
+    return null;
+  }
+  if (node._scale) {
+    return vectorToObject(node._scale);
+  }
+  if (typeof node.scaleX === 'number') {
+    return { x: node.scaleX, y: node.scaleY, z: 1 };
+  }
+  return null;
+}
+
+function getNodeEuler(node) {
+  if (!node || !node.eulerAngles) {
+    return null;
+  }
+  return vectorToObject(node.eulerAngles);
+}
+
+// node.name used to require an exact match, so patterns like '*Camera*' matched
+// nothing. Wildcards are treated as a glob; a plain string is a substring test
+// (both case-insensitive).
+function buildNameMatcher(pattern) {
+  var source = String(pattern);
+  if (source.indexOf('*') === -1 && source.indexOf('?') === -1) {
+    var needle = source.toLowerCase();
+    return function (value) {
+      return String(value).toLowerCase().indexOf(needle) !== -1;
+    };
+  }
+  var out = '';
+  for (var i = 0; i < source.length; i += 1) {
+    var char = source[i];
+    if (char === '*') {
+      out += '.*';
+    } else if (char === '?') {
+      out += '.';
+    } else if ('\\^$.|+()[]{}'.indexOf(char) !== -1) {
+      out += '\\' + char;
+    } else {
+      out += char;
+    }
+  }
+  var regex = new RegExp('^' + out + '$', 'i');
+  return function (value) {
+    return regex.test(String(value));
+  };
+}
+
 function getComponentNames(node) {
-  const components = Array.isArray(node.components) ? node.components : [];
-  return components
-    .map((component) => component && component.constructor && component.constructor.name)
+  return getNodeComponents(node)
+    .map(function (component) { return component && component.constructor && component.constructor.name; })
     .filter(Boolean);
 }
 
 function getSerializableKeys(target) {
-  const keys = new Set();
-  let current = target;
-  let depth = 0;
+  var keys = new Set();
+  var current = target;
+  var depth = 0;
   while (current && current !== Object.prototype && depth < 4) {
-    for (const key of Object.keys(current)) {
-      if (!key.startsWith('_')) {
+    Object.keys(current).forEach(function (key) {
+      if (key.charAt(0) !== '_') {
         keys.add(key);
       }
-    }
+    });
     current = Object.getPrototypeOf(current);
     depth += 1;
   }
@@ -75,15 +140,13 @@ function getSerializableKeys(target) {
 }
 
 function getNodePath(node) {
-  const names = [];
-  let current = node;
-  const scene = getScene();
-
+  var names = [];
+  var current = node;
+  var scene = getScene();
   while (current && current !== scene) {
     names.unshift(current.name);
     current = current.parent;
   }
-
   return names.join('/');
 }
 
@@ -113,15 +176,15 @@ function summarizeNode(node, depth, maxDepth, includeComponents, includeInactive
     return null;
   }
 
-  const summary = {
+  var summary = {
     name: node.name,
     path: getNodePath(node),
     uuid: node.uuid,
     active: Boolean(node.active),
     layer: node.layer,
     position: vectorToObject(node.position),
-    rotation: quatToObject(node.rotation),
-    scale: vectorToObject(node.scale),
+    rotation: getNodeEuler(node),
+    scale: getNodeScale(node),
   };
 
   if (includeComponents) {
@@ -129,13 +192,13 @@ function summarizeNode(node, depth, maxDepth, includeComponents, includeInactive
   }
 
   if (depth < maxDepth) {
-    const children = [];
-    for (const child of node.children) {
-      const childSummary = summarizeNode(child, depth + 1, maxDepth, includeComponents, includeInactive);
+    var children = [];
+    node.children.forEach(function (child) {
+      var childSummary = summarizeNode(child, depth + 1, maxDepth, includeComponents, includeInactive);
       if (childSummary) {
         children.push(childSummary);
       }
-    }
+    });
     summary.children = children;
   } else {
     summary.childCount = node.children.length;
@@ -146,9 +209,9 @@ function summarizeNode(node, depth, maxDepth, includeComponents, includeInactive
 
 function walkNodes(visitor, node) {
   visitor(node);
-  for (const child of node.children) {
+  node.children.forEach(function (child) {
     walkNodes(visitor, child);
-  }
+  });
 }
 
 function findNodeByPath(nodePath) {
@@ -156,23 +219,23 @@ function findNodeByPath(nodePath) {
     return null;
   }
 
-  const segments = String(nodePath)
+  var segments = String(nodePath)
     .split('/')
-    .map((segment) => segment.trim())
+    .map(function (segment) { return segment.trim(); })
     .filter(Boolean);
 
-  let current = getScene();
+  var current = getScene();
   if (segments[0] === current.name) {
     segments.shift();
   }
 
-  for (const segment of segments) {
-    current = current.children.find((child) => child.name === segment);
+  for (var i = 0; i < segments.length; i += 1) {
+    var segment = segments[i];
+    current = current.children.find(function (child) { return child.name === segment; });
     if (!current) {
       return null;
     }
   }
-
   return current;
 }
 
@@ -180,9 +243,8 @@ function findNodeByUuid(uuid) {
   if (!uuid) {
     return null;
   }
-
-  let match = null;
-  walkNodes((node) => {
+  var match = null;
+  walkNodes(function (node) {
     if (!match && node.uuid === uuid) {
       match = node;
     }
@@ -194,9 +256,8 @@ function findNodeByName(name) {
   if (!name) {
     return null;
   }
-
-  let match = null;
-  walkNodes((node) => {
+  var match = null;
+  walkNodes(function (node) {
     if (!match && node.name === name) {
       match = node;
     }
@@ -205,16 +266,8 @@ function findNodeByName(name) {
 }
 
 function findNode(input) {
+  input = input || {};
   return findNodeByUuid(input.uuid) || findNodeByPath(input.path) || findNodeByName(input.name);
-}
-
-function getCceSerializer() {
-  const cceGlobal = typeof globalThis !== 'undefined' ? globalThis.cce : undefined;
-  const serializer = cceGlobal && cceGlobal.Utils && cceGlobal.Utils.serialize;
-  if (typeof serializer !== 'function') {
-    throw new Error('cce.Utils.serialize is unavailable. Prefab serialization must run in the Cocos scene process.');
-  }
-  return serializer.bind(cceGlobal.Utils);
 }
 
 function resolveComponentClass(componentName) {
@@ -225,75 +278,173 @@ function resolveComponentClass(componentName) {
     return componentName;
   }
 
-  const direct = js && typeof js.getClassByName === 'function' ? js.getClassByName(componentName) : null;
+  var engine = getCC();
+  var js = engine.js;
+  var direct = js && typeof js.getClassByName === 'function' ? js.getClassByName(componentName) : null;
   if (direct) {
     return direct;
   }
 
-  const candidates = [componentName, `cc.${componentName}`];
-  for (const candidate of candidates) {
-    const found = js && typeof js.getClassByName === 'function' ? js.getClassByName(candidate) : null;
+  var candidates = [componentName, 'cc.' + componentName];
+  for (var i = 0; i < candidates.length; i += 1) {
+    var found = js && typeof js.getClassByName === 'function' ? js.getClassByName(candidates[i]) : null;
     if (found) {
       return found;
     }
   }
 
+  // Fall back to the engine namespace (for example Label -> cc.Label).
+  var simple = componentName.replace(/^cc\./, '');
+  if (engine[simple]) {
+    return engine[simple];
+  }
   return null;
 }
 
-function findComponent(node, options = {}) {
+function findComponent(node, options) {
+  options = options || {};
   if (!node) {
     return null;
   }
 
   if (Number.isInteger(options.index)) {
-    return node.components[options.index] || null;
+    return getNodeComponents(node)[options.index] || null;
   }
 
   if (options.componentName) {
-    const exact = node.components.find((component) => component && component.constructor && component.constructor.name === options.componentName);
+    var exact = getNodeComponents(node).find(function (component) {
+      return component && component.constructor && component.constructor.name === options.componentName;
+    });
     if (exact) {
       return exact;
     }
-
-    const componentClass = resolveComponentClass(options.componentName);
+    var componentClass = resolveComponentClass(options.componentName);
     if (componentClass) {
       return node.getComponent(componentClass);
     }
   }
-
   return null;
 }
 
-function getEventHandlerClass() {
-  return (Component && Component.EventHandler) || EventHandler || null;
+// Scene-wide lookup used by queries such as list_cameras.
+function findComponentsByClass(componentClass) {
+  var results = [];
+  if (!componentClass) {
+    return results;
+  }
+  walkNodes(function (node) {
+    if (node === getScene()) {
+      return;
+    }
+    var component = node.getComponent(componentClass);
+    if (component) {
+      results.push(component);
+    }
+  }, getScene());
+  return results;
 }
 
-function serializeEventHandler(handler) {
-  if (!handler) {
+function splitPropertyPath(propertyPath) {
+  return String(propertyPath || '')
+    .split('.')
+    .map(function (segment) { return segment.trim(); })
+    .filter(Boolean);
+}
+
+function getValueByPath(target, propertyPath) {
+  var segments = splitPropertyPath(propertyPath);
+  var current = target;
+  for (var i = 0; i < segments.length; i += 1) {
+    if (current == null) {
+      return undefined;
+    }
+    current = current[segments[i]];
+  }
+  return current;
+}
+
+// Cocos Creator 2.4 stores declared property defaults in the class attribute
+// table, and `__initProps__` copies them onto every instance as own properties
+// (there is no prototype default to fall back to). So a reset must read the
+// class default and write it back through the public setter, which keeps engine
+// side effects (renderer camera, clipping planes, ...) in sync. Building a
+// throwaway instance with `__initProps__` yields the defaults as public values.
+function readClassDefaults(instance) {
+  var cls = instance && instance.constructor;
+  var proto = cls && cls.prototype;
+  if (!proto || typeof proto.__initProps__ !== 'function') {
     return null;
   }
-  return {
-    target: handler.target && handler.target.name ? getNodePath(handler.target) : '',
-    targetUuid: handler.target && handler.target.uuid ? handler.target.uuid : '',
-    component: handler.component || '',
-    handler: handler.handler || '',
-    customEventData: handler.customEventData || '',
-  };
+  // Object.create keeps the class prototype in the chain so accessor
+  // properties (fov, clearFlags, ...) resolve through their public getters.
+  var temp = Object.create(proto);
+  try {
+    proto.__initProps__.call(temp, cls);
+  } catch (error) {
+    return null;
+  }
+  return temp;
+}
+
+function resolveDefaultValue(defaults, key) {
+  var candidates = [key, '_' + key];
+  for (var i = 0; i < candidates.length; i += 1) {
+    if (candidates[i] in defaults) {
+      try {
+        return { found: true, value: defaults[candidates[i]] };
+      } catch (error) {
+        // A getter may need live runtime state a bare instance lacks; try the backing field.
+      }
+    }
+  }
+  return { found: false };
+}
+
+function resetValueByPath(target, propertyPath) {
+  var segments = splitPropertyPath(propertyPath);
+  if (!segments.length) {
+    throw new Error('propertyPath is required.');
+  }
+  var current = target;
+  for (var i = 0; i < segments.length - 1; i += 1) {
+    current = current[segments[i]];
+    if (current == null) {
+      return { applied: false, reason: 'path-not-found' };
+    }
+  }
+  if (current == null) {
+    return { applied: false, reason: 'path-not-found' };
+  }
+  var key = segments[segments.length - 1];
+  var defaults = readClassDefaults(current);
+  if (!defaults) {
+    return { applied: false, reason: 'class-defaults-unavailable' };
+  }
+  var resolved = resolveDefaultValue(defaults, key);
+  if (!resolved.found) {
+    return { applied: false, reason: 'unknown-property' };
+  }
+  try {
+    current[key] = resolved.value;
+  } catch (error) {
+    return { applied: false, reason: 'read-only-property' };
+  }
+  return { applied: true };
 }
 
 function getOrAddComponent(node, componentClass) {
   return node.getComponent(componentClass) || node.addComponent(componentClass);
 }
 
-function configureNodeBasics(node, options = {}) {
+function configureNodeBasics(node, options) {
+  options = options || {};
   if (options.position) {
     node.setPosition(options.position.x || 0, options.position.y || 0, options.position.z || 0);
   }
   if (options.scale) {
     node.setScale(options.scale.x || 1, options.scale.y || 1, options.scale.z || 1);
   }
-  if (options.eulerAngles) {
+  if (options.eulerAngles && typeof node.setRotationFromEuler === 'function') {
     node.setRotationFromEuler(
       options.eulerAngles.x || 0,
       options.eulerAngles.y || 0,
@@ -305,247 +456,121 @@ function configureNodeBasics(node, options = {}) {
   }
 }
 
-function configureUITransform(node, options = {}) {
-  const transform = getOrAddComponent(node, UITransform);
-  const width = Number.isFinite(options.width) ? options.width : 160;
-  const height = Number.isFinite(options.height) ? options.height : 60;
-  transform.setContentSize(width, height);
-  if (options.anchor) {
-    transform.setAnchorPoint(options.anchor.x ?? 0.5, options.anchor.y ?? 0.5);
+// 2.4 keeps content size on the node itself (there is no UITransform component).
+function configureContentSize(node, options) {
+  options = options || {};
+  var width = Number.isFinite(options.width) ? options.width : 160;
+  var height = Number.isFinite(options.height) ? options.height : 60;
+  if (typeof node.setContentSize === 'function') {
+    node.setContentSize(width, height);
+  } else {
+    node.width = width;
+    node.height = height;
   }
-  return transform;
+  if (options.anchor && typeof node.setAnchorPoint === 'function') {
+    var ax = options.anchor.x === undefined ? 0.5 : options.anchor.x;
+    var ay = options.anchor.y === undefined ? 0.5 : options.anchor.y;
+    node.setAnchorPoint(ax, ay);
+  }
+  return node;
 }
 
-function parseColor(value, fallback = Color.WHITE) {
+function parseColor(value, fallback) {
+  var engine = getCC();
+  var Color = engine.Color;
   if (!value) {
-    return fallback.clone ? fallback.clone() : fallback;
+    return fallback;
   }
   if (typeof value === 'string') {
-    const normalized = value.startsWith('#') ? value.slice(1) : value;
-    const number = Number.parseInt(normalized.length === 6 ? `${normalized}ff` : normalized, 16);
+    var normalized = value.charAt(0) === '#' ? value.slice(1) : value;
+    var number = Number.parseInt(normalized.length === 6 ? normalized + 'ff' : normalized, 16);
     if (Number.isFinite(number)) {
-      return new Color(
-        (number >> 24) & 255,
-        (number >> 16) & 255,
-        (number >> 8) & 255,
-        number & 255
-      );
+      return new Color((number >> 24) & 255, (number >> 16) & 255, (number >> 8) & 255, number & 255);
     }
   }
-  return new Color(value.r ?? 255, value.g ?? 255, value.b ?? 255, value.a ?? 255);
+  return new Color(
+    value.r === undefined ? 255 : value.r,
+    value.g === undefined ? 255 : value.g,
+    value.b === undefined ? 255 : value.b,
+    value.a === undefined ? 255 : value.a
+  );
 }
 
-function findComponentsByClass(componentClass) {
-  const results = [];
-  walkNodes((node) => {
-    if (node === getScene()) {
+// Cocos Creator 2.4 camera property names differ from 3.x: 2.4 exposes `ortho`
+// (a boolean) instead of a projection enum, `orthoSize`/`nearClip`/`farClip`
+// instead of orthoHeight/near/far, `cullingMask` instead of visibility, and
+// `depth` instead of priority. These are the names applied here.
+var CAMERA_PROPERTY_NAMES = [
+  'depth',
+  'cullingMask',
+  'clearFlags',
+  'ortho',
+  'orthoSize',
+  'fov',
+  'nearClip',
+  'farClip',
+  'zoomRatio',
+];
+
+// cc.Camera.ClearFlags is a bitfield (COLOR=1, DEPTH=2, STENCIL=4). Accept a
+// number, an array of names, or a '|'/comma/space separated string of names.
+function resolveCameraClearFlags(value, engine) {
+  if (typeof value === 'number') {
+    return value;
+  }
+  var flags = engine.Camera && (engine.Camera.ClearFlags || engine.Camera.ClearFlag);
+  if (!flags) {
+    throw new Error('cc.Camera.ClearFlags is unavailable.');
+  }
+  var names = Array.isArray(value) ? value : String(value || '').split(/[|,\s]+/);
+  return names.filter(Boolean).reduce(function (acc, name) {
+    var key = String(name).trim().toUpperCase().replace(/^CAMERA\./, '').replace(/^CLEARFLAGS\./, '');
+    if (typeof flags[key] !== 'number') {
+      throw new Error('Unknown camera clearFlags entry: ' + name);
+    }
+    return acc | flags[key];
+  }, 0);
+}
+
+function applyCameraProperties(camera, options, engine) {
+  CAMERA_PROPERTY_NAMES.forEach(function (key) {
+    if (options[key] === undefined) {
       return;
     }
-    const component = node.getComponent(componentClass);
-    if (component) {
-      results.push(component);
-    }
-  }, getScene());
-  return results;
+    camera[key] = key === 'clearFlags' ? resolveCameraClearFlags(options[key], engine) : options[key];
+  });
+  return camera;
 }
 
-function getPrefabInfo(node) {
-  const prefab = node && node._prefab;
-  if (!prefab) {
-    return {
-      linked: false,
-    };
-  }
-
-  const asset = prefab.asset || prefab._asset || null;
+function summarizeCamera(camera) {
   return {
-    linked: Boolean(asset || prefab.fileId || prefab.root),
-    fileId: prefab.fileId || '',
-    asset: asset
-      ? {
-          name: asset.name || '',
-          uuid: asset.uuid || asset._uuid || '',
-        }
-      : null,
-    instance: prefab.instance ? plain(prefab.instance) : null,
-    sync: prefab.sync,
-    rawKeys: Object.keys(prefab).slice(0, 50),
+    node: camera.node ? getNodePath(camera.node) : '',
+    uuid: camera.node ? camera.node.uuid : '',
+    enabled: Boolean(camera.enabled),
+    depth: camera.depth,
+    cullingMask: camera.cullingMask,
+    clearFlags: camera.clearFlags,
+    ortho: Boolean(camera.ortho),
+    orthoSize: camera.orthoSize,
+    fov: camera.fov,
+    nearClip: camera.nearClip,
+    farClip: camera.farClip,
+    zoomRatio: camera.zoomRatio,
   };
 }
 
-function collectSceneStats() {
-  const stats = {
-    nodeCount: 0,
-    activeNodeCount: 0,
-    inactiveNodeCount: 0,
-    maxDepth: 0,
-    componentCount: 0,
-    componentsByType: {},
-    prefabInstanceCount: 0,
-    uiTransformCount: 0,
-    canvasCount: 0,
-    cameraCount: 0,
-    labelCount: 0,
-    spriteCount: 0,
-    buttonCount: 0,
-  };
+function plain(value, depth, seen) {
+  depth = depth || 0;
+  seen = seen || new WeakSet();
+  var engine = getCC();
 
-  function visit(node, depth) {
-    if (node !== getScene()) {
-      stats.nodeCount += 1;
-      stats.maxDepth = Math.max(stats.maxDepth, depth);
-      if (node.active) stats.activeNodeCount += 1;
-      else stats.inactiveNodeCount += 1;
-      if (node._prefab) stats.prefabInstanceCount += 1;
-    }
-
-    for (const component of node.components || []) {
-      const name = component && component.constructor ? component.constructor.name : 'UnknownComponent';
-      stats.componentCount += 1;
-      stats.componentsByType[name] = (stats.componentsByType[name] || 0) + 1;
-      if (component instanceof UITransform) stats.uiTransformCount += 1;
-      if (component instanceof Canvas) stats.canvasCount += 1;
-      if (component instanceof Camera) stats.cameraCount += 1;
-      if (component instanceof Label) stats.labelCount += 1;
-      if (component instanceof Sprite) stats.spriteCount += 1;
-      if (component instanceof Button) stats.buttonCount += 1;
-    }
-
-    for (const child of node.children) {
-      visit(child, depth + 1);
-    }
-  }
-
-  visit(getScene(), 0);
-  return stats;
-}
-
-function buildSceneWarnings(stats) {
-  const warnings = [];
-  if (stats.nodeCount === 0) {
-    warnings.push({ severity: 'warn', code: 'empty_scene', message: 'The active scene has no child nodes.' });
-  }
-  if (stats.cameraCount === 0) {
-    warnings.push({ severity: 'warn', code: 'missing_camera', message: 'No Camera component was found in the active scene.' });
-  }
-  if (stats.nodeCount > 500) {
-    warnings.push({ severity: 'info', code: 'large_node_count', message: `Scene has ${stats.nodeCount} nodes.` });
-  }
-  if (stats.maxDepth > 12) {
-    warnings.push({ severity: 'info', code: 'deep_hierarchy', message: `Scene hierarchy depth is ${stats.maxDepth}.` });
-  }
-  if (stats.labelCount > 80) {
-    warnings.push({ severity: 'info', code: 'many_labels', message: `Scene has ${stats.labelCount} Label components.` });
-  }
-  return warnings;
-}
-
-function getScheduler() {
-  return typeof director.getScheduler === 'function' ? director.getScheduler() : null;
-}
-
-function loadAnimationClipByUuid(uuid) {
-  return new Promise((resolve, reject) => {
-    assetManager.loadAny(uuid, (error, asset) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      if (!(asset instanceof AnimationClip)) {
-        reject(new Error(`Asset '${uuid}' is not an AnimationClip.`));
-        return;
-      }
-      resolve(asset);
-    });
-  });
-}
-
-function getValueByPath(target, propertyPath) {
-  const segments = String(propertyPath || '')
-    .split('.')
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-
-  let current = target;
-  for (const segment of segments) {
-    if (current == null) {
-      return undefined;
-    }
-    current = current[segment];
-  }
-  return current;
-}
-
-function setValueByPath(target, propertyPath, value) {
-  const segments = String(propertyPath || '')
-    .split('.')
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-
-  if (!segments.length) {
-    throw new Error('propertyPath is required.');
-  }
-
-  let current = target;
-  for (let index = 0; index < segments.length - 1; index += 1) {
-    const segment = segments[index];
-    if (current[segment] == null || typeof current[segment] !== 'object') {
-      current[segment] = {};
-    }
-    current = current[segment];
-  }
-
-  current[segments[segments.length - 1]] = value;
-}
-
-function resetValueByPath(target, propertyPath) {
-  const segments = String(propertyPath || '')
-    .split('.')
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-
-  if (!segments.length) {
-    throw new Error('propertyPath is required.');
-  }
-
-  let current = target;
-  for (let index = 0; index < segments.length - 1; index += 1) {
-    current = current[segments[index]];
-    if (current == null) {
-      return;
-    }
-  }
-
-  const key = segments[segments.length - 1];
-  if (current && Object.prototype.hasOwnProperty.call(current, key)) {
-    delete current[key];
-  } else if (current) {
-    current[key] = undefined;
-  }
-}
-
-function loadAssetByUuid(uuid) {
-  return new Promise((resolve, reject) => {
-    assetManager.loadAny(uuid, (error, asset) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve(asset);
-    });
-  });
-}
-
-function plain(value, depth = 0, seen = new WeakSet()) {
   if (value == null) {
     return value;
   }
-
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     return value;
   }
-
-  if (value instanceof Node) {
+  if (value instanceof engine.Node) {
     return {
       name: value.name,
       path: getNodePath(value),
@@ -554,351 +579,308 @@ function plain(value, depth = 0, seen = new WeakSet()) {
       components: getComponentNames(value),
     };
   }
-
-  if (value instanceof Vec3) {
+  if (engine.Vec3 && value instanceof engine.Vec3) {
     return vectorToObject(value);
   }
-
-  if (value instanceof Quat) {
+  if (engine.Quat && value instanceof engine.Quat) {
     return quatToObject(value);
   }
-
-  if (value instanceof Color) {
+  if (engine.Color && value instanceof engine.Color) {
     return colorToObject(value);
   }
-
   if (Array.isArray(value)) {
     if (depth >= 5) {
-      return `[Array(${value.length})]`;
+      return '[Array(' + value.length + ')]';
     }
-    return value.map((item) => plain(item, depth + 1, seen));
+    return value.map(function (item) { return plain(item, depth + 1, seen); });
   }
-
   if (typeof value === 'object') {
     if (seen.has(value)) {
       return '[Circular]';
     }
     seen.add(value);
-
     if (depth >= 5) {
-      return `[${value.constructor && value.constructor.name ? value.constructor.name : 'Object'}]`;
+      return '[' + (value.constructor && value.constructor.name ? value.constructor.name : 'Object') + ']';
     }
-
-    const output = {};
-    for (const key of Object.keys(value)) {
+    var output = {};
+    Object.keys(value).forEach(function (key) {
       try {
         output[key] = plain(value[key], depth + 1, seen);
       } catch (error) {
-        output[key] = `[Unserializable: ${error.message}]`;
+        output[key] = '[Unserializable: ' + error.message + ']';
       }
-    }
+    });
     return output;
   }
-
   return String(value);
 }
 
-async function executeUserCode(code, args, scriptConsole = console) {
-  const scene = getScene();
-  const runner = new AsyncFunction('require', 'cc', 'Editor', 'scene', 'director', 'args', 'console', `
-    const module = { exports: {} };
-    const exports = module.exports;
-    ${code}
-    if (typeof run === 'function') {
-      return await run({ cc, Editor, scene, director, args, console });
-    }
-    if (typeof module.exports === 'function') {
-      return await module.exports({ cc, Editor, scene, director, args, console });
-    }
-    if (module.exports && typeof module.exports.run === 'function') {
-      return await module.exports.run({ cc, Editor, scene, director, args, console });
-    }
-  `);
-  return await runner(require, cc, global.Editor, scene, director, args || {}, scriptConsole);
+async function executeUserCode(code, args, scriptConsole) {
+  var engine = getCC();
+  var scene = getScene();
+  var Runner = new AsyncFunction('require', 'cc', 'Editor', 'scene', 'director', 'args', 'console', [
+    'const module = { exports: {} };',
+    'const exports = module.exports;',
+    code,
+    'if (typeof run === "function") { return await run({ cc, Editor, scene, director, args, console }); }',
+    'if (typeof module.exports === "function") { return await module.exports({ cc, Editor, scene, director, args, console }); }',
+    'if (module.exports && typeof module.exports.run === "function") { return await module.exports.run({ cc, Editor, scene, director, args, console }); }',
+  ].join('\n'));
+  return await Runner(require, engine, typeof Editor !== 'undefined' ? Editor : undefined, scene, engine.director, args || {}, scriptConsole);
 }
 
-exports.methods = {
-  async getSceneInfo(options = {}) {
-    const maxDepth = Number.isFinite(options.maxDepth) ? options.maxDepth : 2;
-    const includeComponents = options.includeComponents !== false;
-    const scene = getScene();
+// ---------------------------------------------------------------------------
+// Scene serialization
+//
+// Cocos Creator 2.4 has no editor-side scene serializer exposed to extensions,
+// but the scene renderer owns the live graph and Editor.serialize() can turn it
+// back into the on-disk .fire document: a cc.SceneAsset header followed by the
+// scene itself, with every __id__ shifted by one for the extra header entry.
+// ---------------------------------------------------------------------------
+
+function serializeSceneDocument() {
+  if (typeof Editor === 'undefined' || !Editor || typeof Editor.serialize !== 'function') {
+    throw new Error('Editor.serialize is unavailable in this scene context.');
+  }
+  var scene = getScene();
+  var list = JSON.parse(Editor.serialize(scene, { stringify: true, minify: false }));
+
+  function shiftIds(value) {
+    if (Array.isArray(value)) {
+      for (var i = 0; i < value.length; i += 1) {
+        shiftIds(value[i]);
+      }
+      return;
+    }
+    if (!value || typeof value !== 'object') {
+      return;
+    }
+    Object.keys(value).forEach(function (key) {
+      var entry = value[key];
+      if (key === '__id__' && typeof entry === 'number') {
+        value[key] = entry + 1;
+      } else {
+        shiftIds(entry);
+      }
+    });
+  }
+
+  list.forEach(shiftIds);
+  list.unshift({ __type__: 'cc.SceneAsset', _name: '', _objFlags: 0, _native: '', scene: { __id__: 1 } });
+
+  return {
+    uuid: scene.uuid,
+    sceneName: scene.name,
+    content: JSON.stringify(list, null, 2),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Method implementations
+// ---------------------------------------------------------------------------
+
+var implementations = {
+  async getSceneInfo(options) {
+    options = options || {};
+    var maxDepth = Number.isFinite(options.maxDepth) ? options.maxDepth : 2;
+    var includeComponents = options.includeComponents !== false;
+    var scene = getScene();
     return {
       sceneName: scene.name,
       uuid: scene.uuid,
       childCount: scene.children.length,
       nodes: scene.children
-        .map((child) => summarizeNode(child, 1, Math.max(1, maxDepth), includeComponents, true))
+        .map(function (child) { return summarizeNode(child, 1, Math.max(1, maxDepth), includeComponents, true); })
         .filter(Boolean),
     };
   },
 
-  async getHierarchy(options = {}) {
-    const root = options.rootPath ? findNodeByPath(options.rootPath) : getScene();
+  async getHierarchy(options) {
+    options = options || {};
+    var scene = getScene();
+    // Always answer with the same shape (the traversal root's children) so
+    // callers never have to branch on whether rootPath was supplied.
+    var root = options.rootPath ? findNodeByPath(options.rootPath) : scene;
     if (!root) {
-      throw new Error(`Node not found: ${options.rootPath}`);
+      throw new Error('Node not found: ' + options.rootPath);
     }
+    var maxDepth = Number.isFinite(options.maxDepth) ? options.maxDepth : 3;
+    var includeComponents = options.includeComponents !== false;
+    var includeInactive = options.includeInactive !== false;
 
-    const maxDepth = Number.isFinite(options.maxDepth) ? options.maxDepth : 3;
-    const includeComponents = options.includeComponents !== false;
-    const includeInactive = options.includeInactive !== false;
-
-    if (root === getScene()) {
-      return {
-        sceneName: root.name,
-        nodes: root.children
-          .map((child) => summarizeNode(child, 1, Math.max(1, maxDepth), includeComponents, includeInactive))
-          .filter(Boolean),
-      };
-    }
-
-    return summarizeNode(root, 0, Math.max(1, maxDepth), includeComponents, includeInactive);
+    return {
+      sceneName: scene.name,
+      rootPath: root === scene ? '' : getNodePath(root),
+      nodes: root.children
+        .map(function (child) { return summarizeNode(child, 1, Math.max(1, maxDepth), includeComponents, includeInactive); })
+        .filter(Boolean),
+    };
   },
 
-  async inspectNode(options = {}) {
-    const node = findNode(options);
+  async inspectNode(options) {
+    options = options || {};
+    var node = findNode(options);
     if (!node) {
       throw new Error('Target node was not found.');
     }
-
     return {
       name: node.name,
       path: getNodePath(node),
       uuid: node.uuid,
       active: Boolean(node.active),
       layer: node.layer,
-      siblingIndex: node.getSiblingIndex(),
+      siblingIndex: typeof node.getSiblingIndex === 'function' ? node.getSiblingIndex() : undefined,
       position: vectorToObject(node.position),
-      rotation: quatToObject(node.rotation),
-      scale: vectorToObject(node.scale),
-      children: node.children.map((child) => ({
-        name: child.name,
-        path: getNodePath(child),
-        uuid: child.uuid,
-      })),
+      rotation: getNodeEuler(node),
+      scale: getNodeScale(node),
+      width: node.width,
+      height: node.height,
+      children: node.children.map(function (child) {
+        return { name: child.name, path: getNodePath(child), uuid: child.uuid };
+      }),
       components: getComponentNames(node),
     };
   },
 
-  async findNodes(options = {}) {
-    const name = options.name ? String(options.name) : '';
-    const pathContains = options.pathContains ? String(options.pathContains) : '';
-    const component = options.component ? String(options.component) : '';
-    const includeInactive = options.includeInactive !== false;
-    const results = [];
+  async findNodes(options) {
+    options = options || {};
+    var name = options.name ? String(options.name) : '';
+    var nameMatcher = name ? buildNameMatcher(name) : null;
+    var pathContains = options.pathContains ? String(options.pathContains) : '';
+    var component = options.component ? String(options.component) : '';
+    var includeInactive = options.includeInactive !== false;
+    var results = [];
 
-    walkNodes((node) => {
-      if (node === getScene()) {
+    walkNodes(function (node) {
+      if (node === getScene() || (!includeInactive && !node.active)) {
         return;
       }
-
-      if (!includeInactive && !node.active) {
+      var nodePath = getNodePath(node);
+      var components = getComponentNames(node);
+      if (nameMatcher && !nameMatcher(node.name)) {
         return;
       }
-
-      const nodePath = getNodePath(node);
-      const components = getComponentNames(node);
-
-      if (name && node.name !== name) {
+      if (pathContains && nodePath.indexOf(pathContains) === -1) {
         return;
       }
-
-      if (pathContains && !nodePath.includes(pathContains)) {
+      if (component && components.indexOf(component) === -1) {
         return;
       }
-
-      if (component && !components.includes(component)) {
-        return;
-      }
-
-      results.push({
-        name: node.name,
-        path: nodePath,
-        uuid: node.uuid,
-        active: Boolean(node.active),
-        components,
-      });
+      results.push({ name: node.name, path: nodePath, uuid: node.uuid, active: Boolean(node.active), components: components });
     }, getScene());
 
-    return {
-      count: results.length,
-      nodes: results.slice(0, 200),
-    };
+    return { count: results.length, nodes: results.slice(0, 200) };
   },
 
-  async createNode(options = {}) {
-    const name = String(options.name || '').trim();
+  async createNode(options) {
+    options = options || {};
+    var engine = getCC();
+    var name = String(options.name || '').trim();
     if (!name) {
       throw new Error('name is required.');
     }
-
-    const parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
+    var parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
     if (!parent) {
-      throw new Error(`Parent not found: ${options.parentPath}`);
+      throw new Error('Parent not found: ' + options.parentPath);
     }
-
-    const node = new Node(name);
+    var node = new engine.Node(name);
     node.parent = parent;
-
-    if (options.position) {
-      node.setPosition(options.position.x || 0, options.position.y || 0, options.position.z || 0);
-    }
-
-    if (options.scale) {
-      node.setScale(options.scale.x || 1, options.scale.y || 1, options.scale.z || 1);
-    }
-
-    if (options.eulerAngles) {
-      node.setRotationFromEuler(
-        options.eulerAngles.x || 0,
-        options.eulerAngles.y || 0,
-        options.eulerAngles.z || 0
-      );
-    }
-
-    if (typeof options.active === 'boolean') {
-      node.active = options.active;
-    }
-
-    return {
-      created: true,
-      name: node.name,
-      path: getNodePath(node),
-      uuid: node.uuid,
-    };
+    configureNodeBasics(node, options);
+    return { created: true, name: node.name, path: getNodePath(node), uuid: node.uuid };
   },
 
-  async deleteNode(options = {}) {
-    const node = findNode(options);
+  async deleteNode(options) {
+    var node = findNode(options || {});
     if (!node) {
       throw new Error('Target node was not found.');
     }
-
-    const targetPath = getNodePath(node);
+    var targetPath = getNodePath(node);
+    var uuid = node.uuid;
     node.removeFromParent();
     node.destroy();
-
-    return {
-      deleted: true,
-      path: targetPath,
-      uuid: node.uuid,
-    };
+    return { deleted: true, path: targetPath, uuid: uuid };
   },
 
-  async setNodeTransform(options = {}) {
-    const node = findNode(options);
+  async setNodeTransform(options) {
+    options = options || {};
+    var node = findNode(options);
     if (!node) {
       throw new Error('Target node was not found.');
     }
-
-    if (options.position) {
-      node.setPosition(options.position.x || 0, options.position.y || 0, options.position.z || 0);
-    }
-
-    if (options.scale) {
-      node.setScale(options.scale.x || 1, options.scale.y || 1, options.scale.z || 1);
-    }
-
-    if (options.eulerAngles) {
-      node.setRotationFromEuler(
-        options.eulerAngles.x || 0,
-        options.eulerAngles.y || 0,
-        options.eulerAngles.z || 0
-      );
-    }
-
-    if (typeof options.active === 'boolean') {
-      node.active = options.active;
-    }
-
+    configureNodeBasics(node, options);
     return {
       updated: true,
       name: node.name,
       path: getNodePath(node),
       active: Boolean(node.active),
       position: vectorToObject(node.position),
-      rotation: quatToObject(node.rotation),
-      scale: vectorToObject(node.scale),
+      rotation: getNodeEuler(node),
+      scale: getNodeScale(node),
     };
   },
 
-  async listComponents(options = {}) {
-    const node = findNode(options);
+  async listComponents(options) {
+    var node = findNode(options || {});
     if (!node) {
       throw new Error('Target node was not found.');
     }
-
     return {
-      node: {
-        name: node.name,
-        path: getNodePath(node),
-        uuid: node.uuid,
-      },
-      components: node.components.map((component, index) => ({
-        index,
-        name: component && component.constructor ? component.constructor.name : 'UnknownComponent',
-        enabled: typeof component.enabled === 'boolean' ? component.enabled : undefined,
-        keys: getSerializableKeys(component).slice(0, 50),
-      })),
+      node: { name: node.name, path: getNodePath(node), uuid: node.uuid },
+      components: getNodeComponents(node).map(function (component, index) {
+        return {
+          index: index,
+          name: component && component.constructor ? component.constructor.name : 'UnknownComponent',
+          enabled: typeof component.enabled === 'boolean' ? component.enabled : undefined,
+          keys: getSerializableKeys(component).slice(0, 50),
+        };
+      }),
     };
   },
 
-  async addComponent(options = {}) {
-    const node = findNode(options);
+  async addComponent(options) {
+    options = options || {};
+    var node = findNode(options);
     if (!node) {
       throw new Error('Target node was not found.');
     }
-
-    const componentClass = resolveComponentClass(options.componentName);
+    var componentClass = resolveComponentClass(options.componentName);
     if (!componentClass) {
-      throw new Error(`Component class not found: ${options.componentName}`);
+      throw new Error('Component class not found: ' + options.componentName);
     }
-
-    const component = node.addComponent(componentClass);
+    var component = node.addComponent(componentClass);
     return {
       added: true,
       node: getNodePath(node),
       component: component.constructor ? component.constructor.name : options.componentName,
-      index: node.components.indexOf(component),
+      index: getNodeComponents(node).indexOf(component),
     };
   },
 
-  async removeComponent(options = {}) {
-    const node = findNode(options);
+  async removeComponent(options) {
+    var node = findNode(options || {});
     if (!node) {
       throw new Error('Target node was not found.');
     }
-
-    const component = findComponent(node, options);
+    var component = findComponent(node, options);
     if (!component) {
       throw new Error('Target component was not found.');
     }
-
-    const componentName = component.constructor ? component.constructor.name : 'UnknownComponent';
+    var componentName = component.constructor ? component.constructor.name : 'UnknownComponent';
     node.removeComponent(component);
-    return {
-      removed: true,
-      node: getNodePath(node),
-      component: componentName,
-    };
+    return { removed: true, node: getNodePath(node), component: componentName };
   },
 
-  async inspectComponent(options = {}) {
-    const node = findNode(options);
+  async inspectComponent(options) {
+    var node = findNode(options || {});
     if (!node) {
       throw new Error('Target node was not found.');
     }
-
-    const component = findComponent(node, options);
+    var component = findComponent(node, options);
     if (!component) {
       throw new Error('Target component was not found.');
     }
-
     return {
-      node: {
-        name: node.name,
-        path: getNodePath(node),
-        uuid: node.uuid,
-      },
+      node: { name: node.name, path: getNodePath(node), uuid: node.uuid },
       component: {
         name: component.constructor ? component.constructor.name : 'UnknownComponent',
         enabled: typeof component.enabled === 'boolean' ? component.enabled : undefined,
@@ -907,39 +889,90 @@ exports.methods = {
     };
   },
 
-  async setComponentProperty(options = {}) {
-    const node = findNode(options);
+  async setComponentProperty(options) {
+    options = options || {};
+    var node = findNode(options);
     if (!node) {
       throw new Error('Target node was not found.');
     }
-
-    const component = findComponent(node, options);
+    var component = findComponent(node, options);
     if (!component) {
       throw new Error('Target component was not found.');
     }
+    var segments = String(options.propertyPath || '')
+      .split('.')
+      .map(function (segment) { return segment.trim(); })
+      .filter(Boolean);
+    if (!segments.length) {
+      throw new Error('propertyPath is required.');
+    }
+    var current = component;
+    for (var i = 0; i < segments.length - 1; i += 1) {
+      var segment = segments[i];
+      if (current[segment] == null || typeof current[segment] !== 'object') {
+        current[segment] = {};
+      }
+      current = current[segment];
+    }
+    current[segments[segments.length - 1]] = options.value;
 
-    setValueByPath(component, options.propertyPath, options.value);
+    var readBack = component;
+    for (var j = 0; j < segments.length; j += 1) {
+      readBack = readBack == null ? undefined : readBack[segments[j]];
+    }
     return {
       updated: true,
       node: getNodePath(node),
       component: component.constructor ? component.constructor.name : 'UnknownComponent',
       propertyPath: options.propertyPath,
-      value: plain(getValueByPath(component, options.propertyPath)),
+      value: plain(readBack),
     };
   },
 
-  async resetComponentProperty(options = {}) {
-    const node = findNode(options);
+  async invokeComponentMethod(options) {
+    options = options || {};
+    var node = findNode(options);
     if (!node) {
       throw new Error('Target node was not found.');
     }
-
-    const component = findComponent(node, options);
+    var component = findComponent(node, options);
     if (!component) {
       throw new Error('Target component was not found.');
     }
+    var methodName = String(options.methodName || '').trim();
+    if (!methodName || typeof component[methodName] !== 'function') {
+      throw new Error('Component method not found: ' + methodName);
+    }
+    var callArgs = Array.isArray(options.args) ? options.args : [];
+    var result = component[methodName].apply(component, callArgs);
+    if (result && typeof result.then === 'function') {
+      result = await result;
+    }
+    return {
+      invoked: true,
+      node: getNodePath(node),
+      component: component.constructor ? component.constructor.name : 'UnknownComponent',
+      methodName: methodName,
+      result: plain(result),
+    };
+  },
 
-    resetValueByPath(component, options.propertyPath);
+  async resetComponentProperty(options) {
+    options = options || {};
+    var node = findNode(options);
+    if (!node) {
+      throw new Error('Target node was not found.');
+    }
+    var component = findComponent(node, options);
+    if (!component) {
+      throw new Error('Target component was not found.');
+    }
+    var resetResult = resetValueByPath(component, options.propertyPath);
+    if (!resetResult.applied) {
+      throw new Error(
+        'Unable to reset property "' + options.propertyPath + '" (' + (resetResult.reason || 'unknown') + ').'
+      );
+    }
     return {
       reset: true,
       node: getNodePath(node),
@@ -949,235 +982,72 @@ exports.methods = {
     };
   },
 
-  async instantiatePrefab(options = {}) {
-    const prefabUuid = String(options.prefabUuid || '').trim();
-    if (!prefabUuid) {
-      throw new Error('prefabUuid is required.');
-    }
-
-    const parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
+  async createCanvas(options) {
+    options = options || {};
+    var engine = getCC();
+    var parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
     if (!parent) {
-      throw new Error(`Parent not found: ${options.parentPath}`);
+      throw new Error('Parent not found: ' + options.parentPath);
     }
-
-    const asset = await loadAssetByUuid(prefabUuid);
-    if (!(asset instanceof Prefab)) {
-      throw new Error(`Asset '${prefabUuid}' is not a Prefab.`);
-    }
-
-    const node = instantiate(asset);
-    node.parent = parent;
-
-    if (options.name) {
-      node.name = options.name;
-    }
-    if (options.position) {
-      node.setPosition(options.position.x || 0, options.position.y || 0, options.position.z || 0);
-    }
-
-    return {
-      instantiated: true,
-      prefabUuid,
-      node: {
-        name: node.name,
-        path: getNodePath(node),
-        uuid: node.uuid,
-      },
-    };
-  },
-
-  async serializePrefabFromNode(options = {}) {
-    const node = findNode(options);
-    if (!node) {
-      throw new Error('Target node was not found.');
-    }
-
-    const serialize = getCceSerializer();
-    const prefab = new Prefab();
-    if (typeof options.prefabName === 'string') {
-      prefab.name = options.prefabName;
-    }
-
-    const root = instantiate(node);
-    try {
-      root.parent = null;
-      if (options.rootName) {
-        root.name = String(options.rootName);
-      }
-
-      normalizePrefabNodeLayers(root);
-      prefab.data = root;
-      const metadata = attachPrefabMetadata(root, prefab, {
-        prefabUtils: Prefab._utils,
-      });
-      const serialized = serialize(prefab);
-      const content = typeof serialized === 'string'
-        ? serialized
-        : JSON.stringify(serialized, null, 2);
-
-      JSON.parse(content);
-      return {
-        serialized: true,
-        source: {
-          name: node.name,
-          path: getNodePath(node),
-          uuid: node.uuid,
-        },
-        root: {
-          name: root.name,
-        },
-        metadata,
-        content,
-      };
-    } finally {
-      if (root && typeof root.destroy === 'function') {
-        root.destroy();
-      }
-    }
-  },
-
-  async serializeScene(options = {}) {
-    const mode = String(options.mode || 'empty').trim().toLowerCase();
-    if (mode !== 'empty' && mode !== 'current') {
-      throw new Error("mode must be either 'empty' or 'current'.");
-    }
-
-    const sceneName = String(options.sceneName || 'NewScene').trim() || 'NewScene';
-    const source = mode === 'current' ? getScene() : null;
-    const scene = source || new Scene(sceneName);
-    const originalName = source ? source.name : '';
-    const asset = new SceneAsset();
-
-    try {
-      scene.name = sceneName;
-      asset.name = sceneName;
-      asset.scene = scene;
-
-      const serialize = getCceSerializer();
-      const serialized = serialize(asset);
-      const content = typeof serialized === 'string'
-        ? serialized
-        : JSON.stringify(serialized, null, 2);
-
-      JSON.parse(content);
-      return {
-        serialized: true,
-        mode,
-        source: source
-          ? { name: originalName, uuid: source.uuid, childCount: source.children.length }
-          : null,
-        scene: { name: scene.name, childCount: scene.children.length },
-        content,
-      };
-    } finally {
-      asset.scene = null;
-      if (source) {
-        source.name = originalName;
-      } else if (scene && typeof scene.destroy === 'function') {
-        scene.destroy();
-      }
-    }
-  },
-
-  async runSceneAsset(options = {}) {
-    const sceneUuid = String(options.sceneUuid || '').trim();
-    if (!sceneUuid) {
-      throw new Error('sceneUuid is required.');
-    }
-
-    const asset = await loadAssetByUuid(sceneUuid);
-    if (!(asset instanceof SceneAsset)) {
-      throw new Error(`Asset '${sceneUuid}' is not a SceneAsset.`);
-    }
-
-    director.runSceneImmediate(asset);
-    const scene = getScene();
-    return {
-      loaded: true,
-      sceneUuid,
-      sceneName: scene.name,
-      childCount: scene.children.length,
-    };
-  },
-
-  async createCanvas(options = {}) {
-    const parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
-    if (!parent) {
-      throw new Error(`Parent not found: ${options.parentPath}`);
-    }
-
-    const node = new Node(options.name || 'Canvas');
+    var node = new engine.Node(options.name || 'Canvas');
     node.parent = parent;
     configureNodeBasics(node, options);
-    getOrAddComponent(node, Canvas);
-    configureUITransform(node, {
-      width: Number.isFinite(options.width) ? options.width : 1280,
-      height: Number.isFinite(options.height) ? options.height : 720,
+    getOrAddComponent(node, engine.Canvas);
+    configureContentSize(node, {
+      width: Number.isFinite(options.width) ? options.width : 960,
+      height: Number.isFinite(options.height) ? options.height : 640,
     });
-
-    return {
-      created: true,
-      name: node.name,
-      path: getNodePath(node),
-      uuid: node.uuid,
-      components: getComponentNames(node),
-    };
+    return { created: true, name: node.name, path: getNodePath(node), uuid: node.uuid, components: getComponentNames(node) };
   },
 
-  async createLabel(options = {}) {
-    const parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
+  async createLabel(options) {
+    options = options || {};
+    var engine = getCC();
+    var parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
     if (!parent) {
-      throw new Error(`Parent not found: ${options.parentPath}`);
+      throw new Error('Parent not found: ' + options.parentPath);
     }
-
-    const node = new Node(options.name || 'Label');
+    var node = new engine.Node(options.name || 'Label');
     node.parent = parent;
     configureNodeBasics(node, options);
-    configureUITransform(node, options);
-    const label = getOrAddComponent(node, Label);
+    configureContentSize(node, options);
+    var label = getOrAddComponent(node, engine.Label);
     label.string = options.text || 'Label';
     label.fontSize = Number.isFinite(options.fontSize) ? options.fontSize : 32;
     label.lineHeight = Number.isFinite(options.lineHeight) ? options.lineHeight : label.fontSize + 8;
-    label.color = parseColor(options.color, Color.WHITE);
-
-    return {
-      created: true,
-      path: getNodePath(node),
-      uuid: node.uuid,
-      text: label.string,
-    };
+    if (options.color) {
+      label.color = parseColor(options.color, engine.Color.WHITE);
+    }
+    return { created: true, path: getNodePath(node), uuid: node.uuid, text: label.string };
   },
 
-  async createButton(options = {}) {
-    const parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
+  async createButton(options) {
+    options = options || {};
+    var engine = getCC();
+    var parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
     if (!parent) {
-      throw new Error(`Parent not found: ${options.parentPath}`);
+      throw new Error('Parent not found: ' + options.parentPath);
     }
+    var width = Number.isFinite(options.width) ? options.width : 180;
+    var height = Number.isFinite(options.height) ? options.height : 64;
 
-    const node = new Node(options.name || 'Button');
+    var node = new engine.Node(options.name || 'Button');
     node.parent = parent;
     configureNodeBasics(node, options);
-    configureUITransform(node, {
-      ...options,
-      width: Number.isFinite(options.width) ? options.width : 180,
-      height: Number.isFinite(options.height) ? options.height : 64,
-    });
-    const sprite = getOrAddComponent(node, Sprite);
-    sprite.color = parseColor(options.backgroundColor, new Color(64, 96, 255, 255));
-    const button = getOrAddComponent(node, Button);
+    configureContentSize(node, { width: width, height: height });
+    var sprite = getOrAddComponent(node, engine.Sprite);
+    sprite.color = parseColor(options.backgroundColor, new engine.Color(64, 96, 255, 255));
+    var button = getOrAddComponent(node, engine.Button);
     button.target = node;
 
-    const labelNode = new Node(options.labelName || 'Label');
+    var labelNode = new engine.Node(options.labelName || 'Label');
     labelNode.parent = node;
-    configureUITransform(labelNode, {
-      width: Number.isFinite(options.width) ? options.width : 180,
-      height: Number.isFinite(options.height) ? options.height : 64,
-    });
-    const label = getOrAddComponent(labelNode, Label);
+    configureContentSize(labelNode, { width: width, height: height });
+    var label = getOrAddComponent(labelNode, engine.Label);
     label.string = options.text || 'Button';
     label.fontSize = Number.isFinite(options.fontSize) ? options.fontSize : 28;
     label.lineHeight = Number.isFinite(options.lineHeight) ? options.lineHeight : label.fontSize + 8;
-    label.color = parseColor(options.textColor, Color.WHITE);
+    label.color = parseColor(options.textColor, engine.Color.WHITE);
 
     return {
       created: true,
@@ -1188,424 +1058,130 @@ exports.methods = {
     };
   },
 
-  async createSprite(options = {}) {
-    const parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
+  async createSprite(options) {
+    options = options || {};
+    var engine = getCC();
+    var parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
     if (!parent) {
-      throw new Error(`Parent not found: ${options.parentPath}`);
+      throw new Error('Parent not found: ' + options.parentPath);
     }
-
-    const node = new Node(options.name || 'Sprite');
+    var node = new engine.Node(options.name || 'Sprite');
     node.parent = parent;
     configureNodeBasics(node, options);
-    configureUITransform(node, options);
-    const sprite = getOrAddComponent(node, Sprite);
-    sprite.color = parseColor(options.color, Color.WHITE);
+    configureContentSize(node, options);
+    var sprite = getOrAddComponent(node, engine.Sprite);
+    if (options.color) {
+      sprite.color = parseColor(options.color, engine.Color.WHITE);
+    }
     if (options.spriteFrameUuid) {
       sprite.spriteFrame = await loadAssetByUuid(options.spriteFrameUuid);
     }
-
-    return {
-      created: true,
-      path: getNodePath(node),
-      uuid: node.uuid,
-      components: getComponentNames(node),
-    };
+    return { created: true, path: getNodePath(node), uuid: node.uuid, components: getComponentNames(node) };
   },
 
   async listCameras() {
-    const cameras = findComponentsByClass(Camera);
-    return {
-      count: cameras.length,
-      cameras: cameras.map((camera) => ({
-        node: camera.node ? getNodePath(camera.node) : '',
-        uuid: camera.node ? camera.node.uuid : '',
-        enabled: Boolean(camera.enabled),
-        priority: camera.priority,
-        projection: camera.projection,
-        visibility: camera.visibility,
-        clearFlags: camera.clearFlags,
-      })),
-    };
+    var engine = getCC();
+    var cameras = findComponentsByClass(engine.Camera);
+    return { count: cameras.length, cameras: cameras.map(summarizeCamera) };
   },
 
-  async createCamera(options = {}) {
-    const parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
+  async createCamera(options) {
+    options = options || {};
+    var engine = getCC();
+    var parent = options.parentPath ? findNodeByPath(options.parentPath) : getScene();
     if (!parent) {
-      throw new Error(`Parent not found: ${options.parentPath}`);
+      throw new Error('Parent not found: ' + options.parentPath);
     }
-
-    const node = new Node(options.name || 'Camera');
+    var node = new engine.Node(options.name || 'Camera');
     node.parent = parent;
     configureNodeBasics(node, options);
-    const camera = getOrAddComponent(node, Camera);
-    if (Number.isFinite(options.priority)) {
-      camera.priority = options.priority;
-    }
-    if (Number.isFinite(options.visibility)) {
-      camera.visibility = options.visibility;
-    }
-    if (Number.isFinite(options.clearFlags)) {
-      camera.clearFlags = options.clearFlags;
-    }
-
-    return {
-      created: true,
-      path: getNodePath(node),
-      uuid: node.uuid,
-      camera: plain(camera),
-    };
+    var camera = getOrAddComponent(node, engine.Camera);
+    applyCameraProperties(camera, options, engine);
+    return { created: true, path: getNodePath(node), uuid: node.uuid, camera: summarizeCamera(camera) };
   },
 
-  async setCameraProperties(options = {}) {
-    const node = findNode(options);
+  async setCameraProperties(options) {
+    options = options || {};
+    var node = findNode(options);
     if (!node) {
       throw new Error('Target camera node was not found.');
     }
-    const camera = node.getComponent(Camera);
+    var engine = getCC();
+    var camera = node.getComponent(engine.Camera);
     if (!camera) {
-      throw new Error('Camera component was not found on target node.');
+      throw new Error('Camera component was not found on the target node.');
     }
-
-    for (const key of ['priority', 'visibility', 'clearFlags', 'projection', 'orthoHeight', 'fov', 'near', 'far']) {
-      if (options[key] !== undefined) {
-        camera[key] = options[key];
-      }
-    }
-
-    return {
-      updated: true,
-      node: getNodePath(node),
-      camera: plain(camera),
-    };
+    applyCameraProperties(camera, options, engine);
+    return { updated: true, node: getNodePath(node), uuid: node.uuid, camera: summarizeCamera(camera) };
   },
 
-  async listAnimations(options = {}) {
-    const animations = options.path || options.uuid || options.name
-      ? [findNode(options)].filter(Boolean).map((node) => node.getComponent(Animation)).filter(Boolean)
-      : findComponentsByClass(Animation);
-
-    return {
-      count: animations.length,
-      animations: animations.map((animation) => ({
-        node: animation.node ? getNodePath(animation.node) : '',
-        uuid: animation.node ? animation.node.uuid : '',
-        enabled: Boolean(animation.enabled),
-        defaultClip: animation.defaultClip ? animation.defaultClip.name : '',
-        clips: Array.isArray(animation.clips) ? animation.clips.map((clip) => clip && clip.name).filter(Boolean) : [],
-      })),
-    };
+  async serializeScene() {
+    return serializeSceneDocument();
   },
 
-  async addAnimationClip(options = {}) {
-    const node = findNode(options);
-    if (!node) {
-      throw new Error('Target node was not found.');
-    }
-    const clipUuid = String(options.clipUuid || '').trim();
-    if (!clipUuid) {
-      throw new Error('clipUuid is required.');
-    }
-
-    const clip = await loadAnimationClipByUuid(clipUuid);
-    const animation = getOrAddComponent(node, Animation);
-    const clips = Array.isArray(animation.clips) ? animation.clips.slice() : [];
-    if (!clips.includes(clip)) {
-      clips.push(clip);
-      animation.clips = clips;
-    }
-    if (options.makeDefault !== false) {
-      animation.defaultClip = clip;
-    }
-
-    return {
-      added: true,
-      node: getNodePath(node),
-      clip: clip.name,
-      clipUuid,
-      clips: animation.clips.map((item) => item && item.name).filter(Boolean),
-    };
-  },
-
-  async playAnimation(options = {}) {
-    const node = findNode(options);
-    if (!node) {
-      throw new Error('Target node was not found.');
-    }
-    const animation = node.getComponent(Animation);
-    if (!animation) {
-      throw new Error('Animation component was not found on target node.');
-    }
-    const state = options.clipName ? animation.play(options.clipName) : animation.play();
-    return {
-      playing: true,
-      node: getNodePath(node),
-      clip: state && state.clip ? state.clip.name : options.clipName || '',
-    };
-  },
-
-  async stopAnimation(options = {}) {
-    const node = findNode(options);
-    if (!node) {
-      throw new Error('Target node was not found.');
-    }
-    const animation = node.getComponent(Animation);
-    if (!animation) {
-      throw new Error('Animation component was not found on target node.');
-    }
-    if (options.clipName) {
-      animation.stop(options.clipName);
-    } else {
-      animation.stop();
-    }
-    return {
-      stopped: true,
-      node: getNodePath(node),
-      clip: options.clipName || '(all)',
-    };
-  },
-
-  async getRuntimeState() {
-    const scheduler = getScheduler();
-    return {
-      scope: 'editScene',
-      sceneName: getScene().name,
-      paused: typeof director.isPaused === 'function' ? director.isPaused() : false,
-      timeScale: scheduler && typeof scheduler.getTimeScale === 'function' ? scheduler.getTimeScale() : 1,
-      totalFrames: typeof director.getTotalFrames === 'function' ? director.getTotalFrames() : undefined,
-    };
-  },
-
-  async getPerformanceSnapshot() {
-    const scheduler = getScheduler();
-    const stats = collectSceneStats();
-    const memory = typeof performance !== 'undefined' && performance.memory
-      ? {
-          jsHeapSizeLimit: performance.memory.jsHeapSizeLimit,
-          totalJSHeapSize: performance.memory.totalJSHeapSize,
-          usedJSHeapSize: performance.memory.usedJSHeapSize,
-        }
-      : null;
-
-    return {
-      sceneName: getScene().name,
-      runtime: {
-        scope: 'editScene',
-        paused: typeof director.isPaused === 'function' ? director.isPaused() : false,
-        timeScale: scheduler && typeof scheduler.getTimeScale === 'function' ? scheduler.getTimeScale() : 1,
-        totalFrames: typeof director.getTotalFrames === 'function' ? director.getTotalFrames() : undefined,
-      },
-      stats,
-      memory,
-      warnings: buildSceneWarnings(stats),
-    };
-  },
-
-  async getPrefabInstanceInfo(options = {}) {
-    const node = findNode(options);
-    if (!node) {
-      throw new Error('Target node was not found.');
-    }
-    return {
-      node: {
-        name: node.name,
-        path: getNodePath(node),
-        uuid: node.uuid,
-      },
-      prefab: getPrefabInfo(node),
-    };
-  },
-
-  async pauseRuntime() {
-    return await callPreviewRuntimeTool('pause_runtime');
-  },
-
-  async resumeRuntime() {
-    return await callPreviewRuntimeTool('resume_runtime');
-  },
-
-  async setTimeScale(options = {}) {
-    const scale = Number(options.scale);
-    if (!Number.isFinite(scale) || scale < 0 || scale > 100) {
-      throw new Error('scale must be a number between 0 and 100.');
-    }
-    const scheduler = getScheduler();
-    if (!scheduler || typeof scheduler.setTimeScale !== 'function') {
-      throw new Error('director scheduler time scale API is unavailable.');
-    }
-    scheduler.setTimeScale(scale);
-    return await exports.methods.getRuntimeState();
-  },
-
-  async emitNodeEvent(options = {}) {
-    const node = findNode(options);
-    if (!node) {
-      throw new Error('Target node was not found.');
-    }
-    const eventName = String(options.eventName || '').trim();
-    if (!eventName) {
-      throw new Error('eventName is required.');
-    }
-    node.emit(eventName, options.payload || {});
-    return {
-      emitted: true,
-      node: getNodePath(node),
-      eventName,
-    };
-  },
-
-  async simulateButtonClick(options = {}) {
-    const node = findNode(options);
-    if (!node) {
-      throw new Error('Target node was not found.');
-    }
-    const button = node.getComponent(Button);
-    if (!button) {
-      throw new Error('Button component was not found on target node.');
-    }
-
-    if (Component && Component.EventHandler && typeof Component.EventHandler.emitEvents === 'function') {
-      Component.EventHandler.emitEvents(button.clickEvents, button);
-    }
-    node.emit(Button.EventType ? Button.EventType.CLICK : 'click', button);
-
-    return {
-      clicked: true,
-      node: getNodePath(node),
-      clickEventCount: Array.isArray(button.clickEvents) ? button.clickEvents.length : 0,
-    };
-  },
-
-  async listButtonClickEvents(options = {}) {
-    const node = findNode(options);
-    if (!node) {
-      throw new Error('Target node was not found.');
-    }
-    const button = node.getComponent(Button);
-    if (!button) {
-      throw new Error('Button component was not found on target node.');
-    }
-
-    return {
-      node: getNodePath(node),
-      uuid: node.uuid,
-      clickEventCount: Array.isArray(button.clickEvents) ? button.clickEvents.length : 0,
-      clickEvents: Array.isArray(button.clickEvents)
-        ? button.clickEvents.map(serializeEventHandler).filter(Boolean)
-        : [],
-    };
-  },
-
-  async bindButtonClickEvent(options = {}) {
-    const node = findNode(options);
-    if (!node) {
-      throw new Error('Button node was not found.');
-    }
-    const button = node.getComponent(Button);
-    if (!button) {
-      throw new Error('Button component was not found on target node.');
-    }
-
-    const target = findNode({
-      path: options.targetPath,
-      uuid: options.targetUuid,
-      name: options.targetName,
-    });
-    if (!target) {
-      throw new Error('Event target node was not found.');
-    }
-
-    const componentName = String(options.componentName || '').trim();
-    const handlerName = String(options.handler || options.handlerName || '').trim();
-    if (!componentName || !handlerName) {
-      throw new Error('componentName and handler are required.');
-    }
-
-    const component = findComponent(target, { componentName });
-    if (!component) {
-      throw new Error(`Target component was not found: ${componentName}`);
-    }
-    if (typeof component[handlerName] !== 'function') {
-      throw new Error(`Target component method was not found: ${componentName}.${handlerName}`);
-    }
-
-    const HandlerClass = getEventHandlerClass();
-    if (!HandlerClass) {
-      throw new Error('Cocos EventHandler class is unavailable.');
-    }
-
-    const existing = Array.isArray(button.clickEvents) ? button.clickEvents : [];
-    const duplicate = existing.find((event) => (
-      event &&
-      event.target === target &&
-      event.component === componentName &&
-      event.handler === handlerName &&
-      String(event.customEventData || '') === String(options.customEventData || '')
-    ));
-    if (duplicate && options.replace !== true) {
-      return {
-        bound: false,
-        duplicate: true,
-        node: getNodePath(node),
-        event: serializeEventHandler(duplicate),
-        clickEventCount: existing.length,
-      };
-    }
-
-    const event = new HandlerClass();
-    event.target = target;
-    event.component = componentName;
-    event.handler = handlerName;
-    event.customEventData = String(options.customEventData || '');
-
-    button.clickEvents = options.replace === true
-      ? existing.filter((item) => item !== duplicate).concat(event)
-      : existing.concat(event);
-
-    return {
-      bound: true,
-      node: getNodePath(node),
-      uuid: node.uuid,
-      event: serializeEventHandler(event),
-      clickEventCount: button.clickEvents.length,
-    };
-  },
-
-  async invokeComponentMethod(options = {}) {
-    const node = findNode(options);
-    if (!node) {
-      throw new Error('Target node was not found.');
-    }
-    const component = findComponent(node, options);
-    if (!component) {
-      throw new Error('Target component was not found.');
-    }
-    const methodName = String(options.methodName || '').trim();
-    if (!methodName || typeof component[methodName] !== 'function') {
-      throw new Error(`Component method not found: ${methodName}`);
-    }
-
-    const result = component[methodName](...(Array.isArray(options.args) ? options.args : []));
-    return {
-      invoked: true,
-      node: getNodePath(node),
-      component: component.constructor ? component.constructor.name : 'UnknownComponent',
-      methodName,
-      result: plain(result),
-    };
-  },
-
-  async executeCode(options = {}) {
-    const code = String(options.code || '');
+  async executeCode(options) {
+    options = options || {};
+    var code = String(options.code || '');
     if (!code.trim()) {
       throw new Error('code is required.');
     }
-
-    const execute = async (scriptConsole) => {
-      const result = await executeUserCode(code, options.args || {}, scriptConsole);
+    var run = async function (scriptConsole) {
+      var result = await executeUserCode(code, options.args || {}, scriptConsole);
       return { ok: true, result: plain(result), sceneName: getScene().name };
     };
     return options.captureActivity
-      ? captureScriptExecution(execute, { context: 'scene', targetConsole: console })
-      : execute(console);
+      ? captureScriptExecution(run, { context: 'scene', targetConsole: console })
+      : run(console);
   },
 };
+
+function loadAssetByUuid(uuid) {
+  return new Promise(function (resolve, reject) {
+    var engine = getCC();
+    if (!engine.assetManager || typeof engine.assetManager.loadAny !== 'function') {
+      reject(new Error('cc.assetManager.loadAny is unavailable.'));
+      return;
+    }
+    engine.assetManager.loadAny(uuid, function (error, asset) {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(asset);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Dispatcher: adapt argument ordering and reply through the scene script event.
+// ---------------------------------------------------------------------------
+
+Object.keys(implementations).forEach(function (name) {
+  module.exports[name] = function () {
+    var args = Array.prototype.slice.call(arguments);
+    var event = null;
+    var rest = [];
+    for (var i = 0; i < args.length; i += 1) {
+      if (args[i] && typeof args[i].reply === 'function') {
+        event = args[i];
+      } else {
+        rest.push(args[i]);
+      }
+    }
+    var payload = rest.length && rest[0] != null ? rest[0] : {};
+
+    Promise.resolve()
+      .then(function () { return implementations[name](payload); })
+      .then(function (result) {
+        if (event) {
+          event.reply(null, result);
+        }
+      }, function (error) {
+        if (event) {
+          event.reply(error instanceof Error ? error : new Error(String(error)));
+        } else {
+          console.error('[funplay-cocos-mcp] scene script "' + name + '" failed:', error);
+        }
+      });
+  };
+});
